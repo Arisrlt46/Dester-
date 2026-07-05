@@ -83,3 +83,12 @@ cat >> docs/PROBLEMS_AND_SOLUTIONS.md << 'EOF'
 **Cause:** Multiple mid-paste interruptions during earlier heredoc-based file writes left orphan opener/closer lines that were never cleaned up.
 **Solution:** Removed the artifacts surgically with three `sed -i ''` deletions targeting the exact offending lines. Verified the file with `head` and `tail` before committing.
 **Pattern to avoid going forward:** For any docs longer than ~30 lines, prefer editing directly in the VS Code editor rather than terminal heredocs, or check `head`/`tail` immediately after every heredoc write.
+
+---
+
+## Data year swap: 2024 Q2 → 2025 Q2
+
+**Decision point:** Layer 0 was initially built and tested against DB1BMarket 2024 Q2 to keep development moving. That worked, but 2024 Q2 predates the actual Delta AUS-SLC network-planning decision (announced early 2026 for Nov 2026 launch), which weakens DESTER's research posture — the model was running on data an airline planner making the real decision would not yet have leaned on.
+**Resolution:** Re-downloaded DB1BMarket for 2025 Q2 (the last quarter of DB1B before it was replaced by DB1C in July 2025), placed it in `layer0/data/`, deleted the 2024 Q2 file, and re-ran `python -m layer0.pipeline`. Because Layer 0's pipeline was correctly built to glob for `layer0/data/*.csv` rather than hardcode a filename, no code changes were needed.
+**What changed in the data:** Row count 3,381 → 2,933 (-13%); passenger sample flat at ~5,800; mean fare $281 → $251 (-11%); Frontier's share doubled (3% → 6%), displacing American from fourth to fifth in carrier ranking. Interpretation: the AUS-SLC market softened on price between the two years, consistent with more ultra-low-cost carrier presence — legitimate texture for Verdict 2's eventual feed-rescue argument.
+**Follow-up:** Form 41 P-5.2 was downloaded for 2024 Q2 during initial data acquisition, but immediately discarded and will be re-downloaded for 2025 Q2 to match.
