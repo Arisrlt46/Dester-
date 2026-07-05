@@ -71,3 +71,15 @@ cat >> docs/PROBLEMS_AND_SOLUTIONS.md << 'EOF'
 
 **Solution:** Moved the unrelated files back to Downloads; located the actual CSV inside the auto-extracted folder and moved only that file (plus its readme.html) into layer0/data/.
 **Follow-up safeguard:** Added layer0/data/ to .gitignore immediately, since the raw CSV is 2.15 GB, far too large for git, and raw data shouldn't be version-controlled regardless.
+
+---
+
+## Layer 0 build
+
+**Non-obvious behavior (no fix required):** The first `pd.read_parquet` call in a fresh Python process takes roughly 2.25 seconds due to one-time pyarrow engine initialization, not file I/O. A warm second read of the same file completes in ~2 ms.
+**Why it matters:** The Layer 0 success criterion "parquet loads in under 1 second" refers to steady-state read performance, not the cold-start of the pyarrow engine. Anyone benchmarking Layer 0's output should time a second read, not the first.
+
+**Problem (resolved):** The `README.md` file was found to still contain heredoc-corruption artifacts — a stray `cat > README.md << 'EOF'` line near the top and a trailing `EOF` line at the bottom, plus a duplicated `# DESTER` header. These matched the same class of paste-interruption bug already logged in the setup-phase section of this document.
+**Cause:** Multiple mid-paste interruptions during earlier heredoc-based file writes left orphan opener/closer lines that were never cleaned up.
+**Solution:** Removed the artifacts surgically with three `sed -i ''` deletions targeting the exact offending lines. Verified the file with `head` and `tail` before committing.
+**Pattern to avoid going forward:** For any docs longer than ~30 lines, prefer editing directly in the VS Code editor rather than terminal heredocs, or check `head`/`tail` immediately after every heredoc write.
