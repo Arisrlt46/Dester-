@@ -33,3 +33,41 @@ Living document. Every time something breaks, contradicts a design assumption, o
 ---
 
 ## [Future entries added here as each layer is built]
+
+---
+
+## Data acquisition (Layer 0)
+
+**Problem:** DB1B was discontinued as the live data feed. BTS confirms O&D data collection moved to DB1C (monthly, 40% sample) effective July 2025; DB1B (quarterly, 10% sample) is archival only, with its last usable quarter being 2025 Q2.
+**Resolution:** Used DB1B for now, since the historical archive is what's needed to validate a real-world route decision; noted that a future pass could re-point Layer 0 at DB1C for anything post-July-2025.
+
+**Problem:** TranStats' individual field-selection download (choosing exact columns via checkboxes, then clicking Download) repeatedly failed with a dropped-connection error on the DL_SelectFields.aspx page.
+**Cause:** The field-selector endpoint appears to be an older, fragile part of TranStats that times out under certain filter/field combinations.
+**Solution:** Switched to the "Prezipped File" option instead, which downloads BTS's own pre-built full CSV for the quarter (all fields included). Column selection is done locally in pandas instead of via the TranStats UI.
+
+**Problem:** The Filter Year dropdown silently reset from 2025 back to a default (2024) after changing Filter Period, so the first successful download was for 2024 Q2 rather than the intended, more recent 2025 Q2.
+**Resolution:** Used the 2024 Q2 file to build and debug the Layer 0 pipeline first, with 2025 Q2 to be downloaded and swapped in once the pipeline is proven to work end-to-end.
+
+**Problem:** The prezipped file auto-extracted on download (via Safari/macOS), leaving a folder in ~/Downloads rather than a .zip archive. A blind `mv *.zip` fallback command consequently grabbed unrelated zip files from Downloads (a large video file, an unrelated coding project, a resumes archive) into layer0/data/ by mistake.
+**Solution:** Moved the unrelated files back to Downloads; located the actual CSV inside the auto-extracted folder and moved only that file (plus its readme.html) into
+cat >> docs/PROBLEMS_AND_SOLUTIONS.md << 'EOF'
+
+---
+
+## Data acquisition (Layer 0)
+
+**Problem:** DB1B was discontinued as the live data feed. BTS confirms O&D data collection moved to DB1C (monthly, 40% sample) effective July 2025; DB1B (quarterly, 10% sample) is archival only, with its last usable quarter being 2025 Q2.
+**Resolution:** Used DB1B for now, since the historical archive is what's needed to validate a real-world route decision; noted that a future pass could re-point Layer 0 at DB1C for anything post-July-2025.
+
+**Problem:** TranStats' individual field-selection download (choosing exact columns via checkboxes, then clicking Download) repeatedly failed with a dropped-connection error on the DL_SelectFields.aspx page.
+**Cause:** The field-selector endpoint appears to be an older, fragile part of TranStats that times out under certain filter/field combinations.
+**Solution:** Switched to the "Prezipped File" option instead, which downloads BTS's own pre-built full CSV for the quarter (all fields included). Column selection is done locally in pandas instead of via the TranStats UI.
+
+**Problem:** The Filter Year dropdown silently reset from 2025 back to a default (2024) after changing Filter Period, so the first successful download was for 2024 Q2 rather than the intended, more recent 2025 Q2.
+**Resolution:** Used the 2024 Q2 file to build and debug the Layer 0 pipeline first, with 2025 Q2 to be downloaded and swapped in once the pipeline is proven to work end-to-end.
+
+**Problem:** The prezipped file auto-extracted on download (via Safari/macOS), leaving a folder in ~/Downloads rather than a .zip archive. A blind `mv *.zip` fallback command consequently grabbed unrelated zip files from Downloads (a large video file, an unrelated coding project, a resumes archive) into layer0/data/ by mistake.
+
+
+**Solution:** Moved the unrelated files back to Downloads; located the actual CSV inside the auto-extracted folder and moved only that file (plus its readme.html) into layer0/data/.
+**Follow-up safeguard:** Added layer0/data/ to .gitignore immediately, since the raw CSV is 2.15 GB, far too large for git, and raw data shouldn't be version-controlled regardless.
