@@ -85,3 +85,80 @@ Consumes Layer 2's connecting-itinerary set. Produces Verdict 3.
 Planned components: for each connecting itinerary, model the segments as players in a cooperative game with coalition value equal to the fare paid; compute the Shapley value per segment; compare Shapley-attributed revenue for the AUS-SLC segment against mileage-prorated revenue; report the delta and the resulting verdict change (if any).
 
 Detailed spec to be written after Layer 2 is built.
+
+---
+
+## Layer 1 — Local-only business case *(Wave 1 detailed; Wave 2 placeholder)*
+
+Layer 1 is built in two waves. **Wave 1** produces the fitted, backtested multinomial logit share model — the piece that makes DESTER a research project rather than calibrated arithmetic. Wave 2 (market sizing, S-curve, spill/recapture, P&L, and the final Verdict 1) is specified only after Wave 1's backtest results are in hand.
+
+### Wave 1 — Calibration, logit, backtest
+
+Consumes: `layer0/data/Origin_and_Destination_Survey_DB1BMarket_2025_2.csv` (re-parsed for many markets, not just AUS-SLC), and `layer1/data/T_T100D_SEGMENT_US_CARRIER_ONLY.csv` (for frequency and seat-capacity features).
+
+Produces: `layer1/out/calibration_markets.parquet`, `layer1/out/logit_coefficients.json`, `layer1/out/backtest_report.json`.
+
+#### Module 1 — `layer1/calibration.py`
+
+Selects comparable markets from the DB1BMarket source using an automatic rule. AUS-SLC itself is always excluded from calibration (we never train on the market we predict).
+
+Selection rule (all conditions must hold, per directional market):
+- Stage length between 800 and 1,500 non-stop miles.
+- At least one carrier holds ≥ 40% of passenger share.
+- At least one competing carrier holds ≥ 10% of passenger share.
+- Total sampled passengers in the quarter ≥ 5,000.
+
+Rationale: bounds the "similar market" set to short-to-medium haul spoke-to-hub routes with real competition, structurally comparable to AUS-SLC.
+
+Public API:
+- `select_calibration_markets(db1b_csv_path, t100_csv_path) -> pd.DataFrame` returns one row per (market, carrier, itinerary_type, connecting_hub) with observed share as the outcome variable and all features (see Module 2) as columns.
+- `train_test_split(df, test_frac=0.30, random_state=42) -> (train_df, test_df)` splits stratified by market so that no market appears in both sets.
+
+Writes `layer1/out/calibration_markets.parquet` with a `split` column set to `"train"` or `"test"`.
+
+#### Module 2 — `layer1/logit.py`
+
+The multinomial logit share model. Uses `statsmodels.discrete.discrete_model.MNLogit`.
+
+Features (utility inputs per itinerary), all defensibly derivable from data on disk:
+
+- `log_fare` — natural log of `MktFare`.
+- `n_stops` — 0 for nonstop (`MktCoupons == 1`), 1 for single connect (`MktCoupons == 2`); connects with more coupons are dropped as edge cases.
+- `routing_efficiency` — `MktDistance / NonStopMiles`. Values near 1.0 indicate near-direct routing; higher values indicate detours.
+- `frequency_weekly` — weekly `DEPARTURES_PERFORMED` on the operating segment from T-100 (2025 Q2 average).
+- `seats_per_departure` — `SEATS / DEPARTURES_PERFORMED` from T-100 for the operating segment.
+- `hub_dominance` — 1 if the operating carrier's overall passenger share at the connecting airport is ≥ 40% (computed within the calibration set), else 0. For nonstop itineraries, defined as 0.
+- `carrier_fe_<code>` — carrier fixed-effect dummies, one per carrier present in the calibration set (drop-first encoding).
+
+Public API:
+- `fit(train_df, features: list[str] | None = None) -> LogitCoefficients` — if `features` is None, uses all features above. Returns a JSON-serializable coefficients object.
+- `predict_shares(itineraries_df, coefficients) -> pd.Series` — returns predicted share per itinerary within a market (softmax over the utility scores).
+- `save_coefficients(coefficients, path)` and `load_coefficients(path)`.
+
+Writes `layer1/out/logit_coefficients.json`.
+
+#### Module 3 — `layer1/backtest.py`
+
+Takes the fitted coefficients and the held-out test set. For each test market: predict shares per itinerary, aggregate to carrier-level shares, compare to observed.
+
+Reports:
+- **MAE on carrier share** (percentage points), pooled across test markets. Headline metric.
+- **RMSE on carrier share**, same pooling.
+- **Per-market breakdown table**, one row per test market, listing predicted-vs-observed share for each carrier.
+- **Feature ablation table** — refits the logit dropping one feature at a time, reports the resulting test MAE, so we can honestly see which features are pulling weight.
+
+Success target: pooled MAE ≤ 10 percentage points, matching typical published airline logit share models. If MAE exceeds 15pp, Wave 1 is not considered validated and the model is revised before Wave 2 is spec'd.
+
+Public API:
+- `run_backtest(train_df, test_df, features: list[str] | None = None) -> dict`
+- `write_backtest_report(report, path)`
+
+Writes `layer1/out/backtest_report.json` and prints a summary to stdout.
+
+#### Wave 1 orchestrator
+
+`layer1/verdict1_wave1.py` — runs the three modules in order end-to-end. Runnable via `python -m layer1.verdict1_wave1`.
+
+### Wave 2 — Sizing, S-curve, spill, P&L, Verdict 1 *(placeholder; spec after Wave 1 results)*
+
+Consumes Wave 1's coefficients plus Layer 0's AUS-SLC parquet. Applies the model to AUS-SLC, adds stimulation uplift, S-curve frequency effects, stochastic spill and recapture, and Delta E175 CASM from Form 41 P-5.2 + T-100 to produce a route P&L and Verdict 1. Specified after Wave 1's backtest results are reviewed, since the backtest may indicate a different feature set or a different downstream treatment.
