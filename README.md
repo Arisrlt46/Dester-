@@ -66,3 +66,7 @@ DB1B contains **domestic** O&D fares only, so the primary build substrate is a *
 ## Status
 
 Scaffolding. Repo initialized; docs/ to be populated; Layer 0 data pipeline is the immediate next build.
+
+## Professional consultation & validation
+
+DESTER is designed to be validated not just statistically (via Layer 1's logit backtest) but against how airline network planning, revenue management, and alliance practitioners actually think about route decisions. The outreach plan, target archetypes, and what counts as validation are documented in [docs/CONSULTATION_PLAN.md](docs/CONSULTATION_PLAN.md).
