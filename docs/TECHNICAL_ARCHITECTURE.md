@@ -126,8 +126,7 @@ Features (utility inputs per itinerary), all defensibly derivable from data on d
 - `n_stops` — 0 for nonstop (`MktCoupons == 1`), 1 for single connect (`MktCoupons == 2`); connects with more coupons are dropped as edge cases.
 - `routing_efficiency` — `MktDistance / NonStopMiles`. Values near 1.0 indicate near-direct routing; higher values indicate detours.
 - `frequency_weekly` — weekly `DEPARTURES_PERFORMED` on the operating segment from T-100 (2025 Q2 average).
-- `seats_per_departure` — `SEATS / DEPARTURES_PERFORMED` from T-100 for the operating segment.
-- `hub_dominance` — 1 if the operating carrier's overall passenger share at the connecting airport is ≥ 40% (computed within the calibration set), else 0. For nonstop itineraries, defined as 0.
+- `hub_dominance` — 1 if the operating carrier's overall passenger share at the relevant hub airport is ≥ 40% (computed within the calibration set), else 0. For nonstops, the "relevant hub airport" is the origin. For one-stop itineraries, it is the connecting airport. This corrects a Wave 1 spec bug where the feature was switched off precisely where hub dominance is strongest (a carriers own nonstops from its own hub).
 - `carrier_fe_<code>` — carrier fixed-effect dummies, one per carrier present in the calibration set (drop-first encoding).
 
 Public API:
@@ -162,3 +161,5 @@ Writes `layer1/out/backtest_report.json` and prints a summary to stdout.
 ### Wave 2 — Sizing, S-curve, spill, P&L, Verdict 1 *(placeholder; spec after Wave 1 results)*
 
 Consumes Wave 1's coefficients plus Layer 0's AUS-SLC parquet. Applies the model to AUS-SLC, adds stimulation uplift, S-curve frequency effects, stochastic spill and recapture, and Delta E175 CASM from Form 41 P-5.2 + T-100 to produce a route P&L and Verdict 1. Specified after Wave 1's backtest results are reviewed, since the backtest may indicate a different feature set or a different downstream treatment.
+
+**Wave 1 iteration note (added after first-run backtest):** During re-fits, inspect the fare distribution reaching the logit at fit time. All fares should be strictly positive (Layer 0 already drops non-positive fares) and roughly log-normal. If the distribution is bimodal or truncated in an unexpected way, an interaction with feature standardization is a likely cause of coefficient instability. Log any anomalies to `PROBLEMS_AND_SOLUTIONS.md`.
