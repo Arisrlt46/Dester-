@@ -163,3 +163,75 @@ Writes `layer1/out/backtest_report.json` and prints a summary to stdout.
 Consumes Wave 1's coefficients plus Layer 0's AUS-SLC parquet. Applies the model to AUS-SLC, adds stimulation uplift, S-curve frequency effects, stochastic spill and recapture, and Delta E175 CASM from Form 41 P-5.2 + T-100 to produce a route P&L and Verdict 1. Specified after Wave 1's backtest results are reviewed, since the backtest may indicate a different feature set or a different downstream treatment.
 
 **Wave 1 iteration note (added after first-run backtest):** During re-fits, inspect the fare distribution reaching the logit at fit time. All fares should be strictly positive (Layer 0 already drops non-positive fares) and roughly log-normal. If the distribution is bimodal or truncated in an unexpected way, an interaction with feature standardization is a likely cause of coefficient instability. Log any anomalies to `PROBLEMS_AND_SOLUTIONS.md`.
+
+### Wave 2 — Sizing, S-curve, spill, P&L, Verdict 1
+
+Wave 2 turns the fitted logit from Wave 1 into Verdict 1 for the specific AUS-SLC market on Delta. Wave 1 is a prerequisite: `layer1/out/logit_coefficients.json` and Layer 0's `aus_slc_market.parquet` must exist before Wave 2 runs.
+
+Consumes: `layer0/out/aus_slc_market.parquet`, `layer0/out/summary.json`, `layer1/out/logit_coefficients.json`, `layer1/data/T_F41SCHEDULE_P52.csv`, `layer1/data/T_T100D_SEGMENT_US_CARRIER_ONLY.csv`.
+
+Produces: `layer1/out/verdict1.json`.
+
+#### Module 4 — `layer1/sizing.py`
+
+Turns Layer 0's 10% quarterly sample into an annualized total market size with stimulation uplift.
+
+- `annualize_sample(quarter_passenger_sample) -> float` returns `sample * 10 * 4` (DB1B is 10% sample per quarter).
+- `apply_stimulation(base_pax, uplift=0.15) -> float` returns `base_pax * (1 + uplift)`.
+- `market_size(layer0_summary_path, uplift=0.15) -> dict` orchestrates and returns `{base_pax, uplift, sized_pax}`.
+
+**Rationale for stimulation uplift.** A new nonstop stimulates demand that didn't previously exist: passengers who were formerly connecting upgrade to nonstop, some formerly-driving passengers now fly, and some previously-unmade trips now happen. Documented default: 15%. Sensitivity range: 10% to 25%.
+
+#### Module 5 — `layer1/scurve.py`
+
+Airline-industry-standard S-curve for the frequency-share effect: a carrier's share grows nonlinearly with its frequency share.
+
+- `frequency_share(delta_freq, all_freqs) -> float` returns `delta_freq / sum(all_freqs)`.
+- `scurve_share(delta_freq, all_freqs, alpha=1.6) -> float` returns `(delta_freq / sum(all_freqs))^alpha / sum((f / sum(all_freqs))^alpha for f in all_freqs)`.
+
+**Delta's proposed AUS-SLC frequency.** Delta announced 2x-daily service. Incumbent frequencies (Southwest, Frontier, etc.) are computed from the T-100 file already on disk: sum of `DEPARTURES_PERFORMED` on the AUS-SLC segment in 2025 Q2, divided by weeks in the quarter.
+
+**Documented default α = 1.6.** Sensitivity range 1.4 to 1.8.
+
+#### Module 6 — `layer1/spill.py`
+
+Stochastic spill and recapture. Demand isn't deterministic; some days you overshoot capacity and lose passengers; some of them buy another Delta ticket in the same market anyway.
+
+- `expected_boardings(mean_daily_pax, seats_per_departure, freq_per_day, recapture=0.15) -> dict` models daily demand as Poisson (or Normal if mean is large enough to justify the approximation), caps at `seats_per_departure * freq_per_day`, applies `recapture` to spilled passengers, returns `{expected_demand, expected_spill, expected_recapture, expected_boarded, expected_load_factor}`.
+
+**Documented default recapture = 15%.** Sensitivity range 10% to 30%.
+
+#### Module 7 — `layer1/pnl.py`
+
+Route P&L and breakeven load factor for Delta's proposed AUS-SLC service.
+
+- `resolve_e175_aircraft_type_code(p52_csv_path, t100_csv_path) -> int` programmatically identifies the E175 aircraft type code by finding the `AIRCRAFT_TYPE` value that (a) Delta operates most heavily in 2025 Q2, and (b) has a fleet-average seats-per-departure between 70 and 82 (E175 is a 76-seat regional jet). Logs the identified code and the seats-per-departure for verification.
+
+- `compute_delta_e175_casm(p52_csv_path, t100_csv_path, quarter=2, year=2025) -> dict` filters Form 41 P-5.2 to Delta + E175 + 2025 Q2 for the numerator (`TOT_AIR_OP_EXPENSES`), filters T-100 to the same carrier + aircraft + Q2 months for the denominator (`SEATS * DISTANCE` summed), returns `{opex_usd, asms, casm_cents_per_asm}`.
+
+- `route_pnl(revenue, asms, casm) -> dict` returns `{revenue, cost, contribution, breakeven_lf}`.
+
+- `main_pnl(expected_boardings, mean_fare, seats_per_departure, freq_per_day, quarter_days, distance_miles, casm_cents) -> dict` orchestrates the AUS-SLC P&L end-to-end.
+
+#### Module 8 — `layer1/verdict1.py`
+
+Wave 2 orchestrator and Verdict 1 output.
+
+Runs: market sizing → logit predict on Delta's proposed AUS-SLC itinerary → S-curve adjustment → spill model → P&L → verdict.
+
+**Verdict rule.** `go` if `expected_load_factor >= breakeven_load_factor`. `no_go` otherwise.
+
+**Sensitivities.** Re-runs the full chain across three axes at their documented sensitivity ranges:
+- Stimulation uplift: 10%, 15%, 20%, 25%.
+- Recapture rate: 10%, 15%, 20%, 30%.
+- S-curve α: 1.4, 1.6, 1.8.
+
+Reports the verdict at every combination, plus a summary noting whether the verdict is robust (same under all combinations) or fragile (flips under some).
+
+**Output file `layer1/out/verdict1.json` schema:**
+
+Fields in `layer1/out/verdict1.json`: `market` ("AUS-SLC"), `carrier` ("DL"), `verdict` ("go" or "no_go"), `robust` (bool), `expected_load_factor` (float), `breakeven_load_factor` (float), `revenue_annual_usd` (float), `cost_annual_usd` (float), `contribution_annual_usd` (float), `delta_e175_casm_cents` (float), `sizing` (object with `base_pax`, `uplift`, `sized_pax`), `predicted_delta_share` (float), `sensitivities` (list of objects each with `uplift`, `recapture`, `alpha`, `verdict`, `expected_lf`, `breakeven_lf`), and `generated_at` (ISO 8601 string).
+
+Runnable via `python -m layer1.verdict1`. Prints a human-readable summary to stdout.
+
+**Expected Verdict 1 outcome.** DESTER's research design assumes Verdict 1 comes back **no-go**. AUS-SLC's local O&D is thin, Southwest is entrenched, and Delta's fixed costs at 2x daily are non-trivial. If Verdict 1 comes back go on local demand alone, that materially undermines the three-verdict thesis and requires a separate investigation before proceeding to Layer 2. This outcome expectation is stated for transparency, not to bias the model.
