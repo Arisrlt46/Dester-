@@ -61,7 +61,6 @@ T100_USECOLS = [
     "DEST",
     "CARRIER",
     "DEPARTURES_PERFORMED",
-    "SEATS",
     "YEAR",
     "MONTH",
 ]
@@ -161,11 +160,9 @@ def load_t100_features(t100_csv_path):
 
     agg = t100.groupby(["ORIGIN", "DEST", "CARRIER"], as_index=False).agg(
         total_departures=("DEPARTURES_PERFORMED", "sum"),
-        total_seats=("SEATS", "sum"),
     )
     agg["frequency_weekly"] = agg["total_departures"] / T100_WEEKS_PER_QUARTER
-    agg["seats_per_departure"] = agg["total_seats"] / agg["total_departures"].replace(0, np.nan)
-    return agg[["ORIGIN", "DEST", "CARRIER", "frequency_weekly", "seats_per_departure"]]
+    return agg[["ORIGIN", "DEST", "CARRIER", "frequency_weekly"]]
 
 
 def _join_t100_features(df, t100_features):
@@ -192,8 +189,10 @@ def _compute_hub_dominance(df):
     """Each carrier's overall passenger share at each airport across the calibration set.
 
     Uses OpCarrier (the operating carrier) and counts an airport's traffic from
-    both endpoints of every itinerary in the set. Joined back onto each
-    connecting itinerary at its connecting airport; nonstop itineraries get 0.
+    both endpoints of every itinerary in the set. For nonstop itineraries, the
+    relevant hub airport is the origin (a carrier's own nonstops from its own
+    hub is precisely where hub dominance is strongest). For one-stop
+    itineraries, the relevant hub airport is the connecting airport.
     """
     origin_leg = df[["Origin", "OpCarrier", "Passengers"]].rename(columns={"Origin": "airport"})
     dest_leg = df[["Dest", "OpCarrier", "Passengers"]].rename(columns={"Dest": "airport"})
@@ -207,17 +206,17 @@ def _compute_hub_dominance(df):
 
     share_lookup = airport_carrier_share.reset_index(name="op_carrier_airport_share")
 
+    relevant_hub = np.where(df["itinerary_type"] == "nonstop", df["Origin"], df["connecting_hub"])
+    df = df.copy()
+    df["_relevant_hub"] = relevant_hub
+
     merged = df.merge(
         share_lookup,
-        left_on=["connecting_hub", "OpCarrier"],
+        left_on=["_relevant_hub", "OpCarrier"],
         right_on=["airport", "OpCarrier"],
         how="left",
     )
-    hub_dominance = np.where(
-        merged["itinerary_type"] == "connect",
-        (merged["op_carrier_airport_share"].fillna(0) >= HUB_DOMINANCE_THRESHOLD).astype(float),
-        0.0,
-    )
+    hub_dominance = (merged["op_carrier_airport_share"].fillna(0) >= HUB_DOMINANCE_THRESHOLD).astype(float)
     return hub_dominance
 
 
@@ -246,7 +245,6 @@ def _aggregate_to_alternatives(df, market_totals):
                 "n_stops": group["n_stops"].iloc[0],
                 "routing_efficiency": _weighted_mean(group["routing_efficiency"], pax),
                 "frequency_weekly": _weighted_mean(group["frequency_weekly"], pax),
-                "seats_per_departure": _weighted_mean(group["seats_per_departure"], pax),
                 "hub_dominance": _weighted_mean(group["hub_dominance"], pax),
                 "passengers": pax.sum(),
             }
@@ -274,7 +272,7 @@ def select_calibration_markets(db1b_csv_path, t100_csv_path):
     df["hub_dominance"] = _compute_hub_dominance(df)
 
     before_t100_drop = len(df)
-    df = df.dropna(subset=["frequency_weekly", "seats_per_departure"])
+    df = df.dropna(subset=["frequency_weekly"])
     dropped = before_t100_drop - len(df)
     if dropped:
         print(f"  dropped {dropped} itineraries with no matching T-100 segment (e.g. interline OpCarrier=99)")

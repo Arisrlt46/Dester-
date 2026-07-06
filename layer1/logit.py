@@ -14,13 +14,13 @@ import json
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from scipy.stats import kurtosis, skew
 
 DEFAULT_FEATURES = [
     "log_fare",
     "n_stops",
     "routing_efficiency",
     "frequency_weekly",
-    "seats_per_departure",
     "hub_dominance",
 ]
 
@@ -29,20 +29,63 @@ INTERCEPT_KEY = "carrier_fe"
 FIT_METHOD = "lbfgs"
 FIT_MAXITER = 1000
 
+FARE_NEAR_ZERO_USD = 10.0
+BIMODALITY_COEFFICIENT_THRESHOLD = 0.555
+
+
+def _log_fare_diagnostics(df):
+    """Log min/max/median fare and log-fare skew for the rows reaching the logit.
+
+    Flags near-zero fares and a Sarle's bimodality coefficient above the
+    conventional 0.555 threshold, which would suggest two distinct fare
+    populations got pooled into one alternative-row rather than a single
+    coherent market price.
+    """
+    log_fare = df["log_fare"].astype(float)
+    fare = np.exp(log_fare)
+
+    fare_min = float(fare.min())
+    fare_max = float(fare.max())
+    fare_median = float(fare.median())
+    log_fare_skew = float(skew(log_fare))
+
+    print("  fare diagnostic (fitting rows, after cleaning):")
+    print(f"    fare min=${fare_min:.2f} max=${fare_max:.2f} median=${fare_median:.2f}")
+    print(f"    log_fare skew={log_fare_skew:.3f}")
+
+    near_zero_count = int((fare < FARE_NEAR_ZERO_USD).sum())
+    if near_zero_count:
+        print(
+            f"    WARNING: {near_zero_count} rows have fare below ${FARE_NEAR_ZERO_USD:.0f} "
+            f"(min=${fare_min:.2f}) — check upstream cleaning."
+        )
+
+    n = len(log_fare)
+    if n > 3:
+        log_fare_kurtosis = float(kurtosis(log_fare, fisher=False))
+        excess_kurtosis_correction = 3 * (n - 1) ** 2 / ((n - 2) * (n - 3))
+        bimodality_coefficient = (log_fare_skew ** 2 + 1) / max(log_fare_kurtosis, excess_kurtosis_correction)
+        if bimodality_coefficient > BIMODALITY_COEFFICIENT_THRESHOLD:
+            print(
+                f"    WARNING: log_fare bimodality coefficient={bimodality_coefficient:.3f} exceeds "
+                f"{BIMODALITY_COEFFICIENT_THRESHOLD} — fare distribution may be bimodal."
+            )
+
 
 def fit(train_df, features=None):
     """Fit MNLogit with y=carrier, X=features (+intercept). Returns a coefficients dict.
 
     Features are standardized before fitting (statsmodels' default Newton solver
-    diverges to NaN on this many categories with unscaled features like
-    seats_per_departure vs. hub_dominance); the fitted coefficients are then
-    transformed back to raw-feature scale so predict_shares and the saved JSON
-    operate on the features as-is.
+    diverges to NaN on this many categories with unscaled features on very
+    different scales, e.g. frequency_weekly vs. hub_dominance); the fitted
+    coefficients are then transformed back to raw-feature scale so
+    predict_shares and the saved JSON operate on the features as-is.
     """
     if features is None:
         features = DEFAULT_FEATURES
 
     df = train_df.dropna(subset=list(features) + ["carrier"]).copy()
+    _log_fare_diagnostics(df)
     carrier_codes, carrier_categories = pd.factorize(df["carrier"], sort=True)
 
     raw_X = df[list(features)].astype(float)
