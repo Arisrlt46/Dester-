@@ -235,3 +235,78 @@ Fields in `layer1/out/verdict1.json`: `market` ("AUS-SLC"), `carrier` ("DL"), `v
 Runnable via `python -m layer1.verdict1`. Prints a human-readable summary to stdout.
 
 **Expected Verdict 1 outcome.** DESTER's research design assumes Verdict 1 comes back **no-go**. AUS-SLC's local O&D is thin, Southwest is entrenched, and Delta's fixed costs at 2x daily are non-trivial. If Verdict 1 comes back go on local demand alone, that materially undermines the three-verdict thesis and requires a separate investigation before proceeding to Layer 2. This outcome expectation is stated for transparency, not to bias the model.
+
+---
+
+## Layer 2 — Feed as addition to viable local market
+
+**Redefined purpose.** The original Layer 2 framing ("does connecting feed rescue a thin local market from no-go?") does not apply, because Wave 2 established that AUS-SLC is viable on local demand alone (Verdict 1 = GO). Layer 2 is therefore reframed: quantify how much *additional* Delta economic value comes from behind-and-beyond passengers routed through SLC, and produce the passenger-mix split (local vs. feed) that Layer 3's Shapley attribution question depends on.
+
+Consumes: `layer0/data/Origin_and_Destination_Survey_DB1BMarket_2025_2.csv` (reparsed with a coupon-touching filter, not the market-pair filter Layer 0 used), `layer0/out/aus_slc_market.parquet`, `layer0/out/summary.json`, and `layer1/out/verdict1.json`.
+
+Produces: `layer2/out/feed_itineraries.parquet`, `layer2/out/feed_economics.parquet`, `layer2/out/verdict2.json`.
+
+Reuses Layer 0's raw DB1B file directly. Layer 2 does not require a separate TranStats download.
+
+### Module 1 — `layer2/feed_extraction.py`
+
+Streams the raw DB1BMarket CSV chunk-by-chunk and extracts feed itineraries — those where the AUS-SLC segment appears as one coupon of a two-coupon itinerary, and the itinerary's market pair is *not* AUS-SLC directly.
+
+Rule: keep row if `MktCoupons == 2` and `AirportGroup` contains `"AUS:SLC"` or `"SLC:AUS"` as a substring, and the market pair (sorted `[Origin, Dest]`) is not `["AUS", "SLC"]`.
+
+Feed extraction is intentionally permissive (option 1A in the design discussion): all feasible connections through SLC are included, even routings that appear as geographic detours. Real observed passenger behavior is the honest count; a "sensible-routing" filter would introduce judgment calls.
+
+Adds derived columns:
+- `feed_direction`: `"BEHIND"` if the itinerary's true origin is AUS (routings AUS → SLC → X), `"BEYOND"` if the true destination is AUS (routings X → SLC → AUS).
+- `beyond_endpoint`: the far end of the feed (the non-AUS, non-SLC airport in the AirportGroup).
+- `aus_slc_leg_direction`: `"A_TO_B"` (AUS→SLC) or `"B_TO_A"` (SLC→AUS).
+
+Writes `layer2/out/feed_itineraries.parquet`.
+
+Public API:
+- `extract_feed_itineraries(db1b_csv_path) -> pd.DataFrame`
+- `resolve_csv_path(pattern)` — same glob-and-error pattern used in Layer 0 and Layer 1.
+
+### Module 2 — `layer2/feed_economics.py`
+
+For each feed itinerary, computes the passenger economics on the AUS-SLC segment.
+
+**Delta's share of each feed market comes from observed DB1B data, not the Wave 1 logit** (option 2B in the design discussion). The rationale is that Verdict 2 answers a factual question about the passenger flow Delta actually captures; the logit is reserved for Layer 3's counterfactuals.
+
+For each unique feed market (defined by the sorted airport pair excluding SLC, e.g. AUS-SEA, AUS-BOI), Delta's share is `sum(Passengers where operating carrier is DL) / sum(Passengers)` computed on that market's rows in DB1B.
+
+**Fare allocation to the AUS-SLC segment is provisional mileage proration for Layer 2.** Layer 3 will replace this with Shapley. For each feed itinerary, `aus_slc_allocated_fare = MktFare * (aus_slc_miles / total_mkt_miles)`, where `aus_slc_miles` is the great-circle AUS-SLC distance (~1085 mi, taken from Layer 0's typed schema) and `total_mkt_miles` is `NonStopMiles` for the two-coupon itinerary.
+
+Public API:
+- `compute_feed_shares(feed_df, raw_db1b_csv_path) -> pd.DataFrame` — one row per (beyond_endpoint, direction), with Delta's observed share.
+- `allocate_fares(feed_df, aus_slc_miles=1085) -> pd.DataFrame` — adds `aus_slc_allocated_fare`.
+- `feed_economics(feed_df, shares_df) -> pd.DataFrame` — joins share and fare, returns per-itinerary Delta feed passenger and revenue estimates.
+
+Writes `layer2/out/feed_economics.parquet`.
+
+### Module 3 — `layer2/pnl_with_feed.py`
+
+Replays Verdict 1's P&L math but with total AUS-SLC passengers = local + feed and total revenue = local revenue + Delta's feed-allocated revenue.
+
+Reuses `layer1/pnl.compute_delta_e175_casm` and `layer1/pnl.route_pnl` for the cost side — feed does not change the cost of flying the aircraft. Only the revenue side and passenger mix change.
+
+Handles the capacity interaction honestly: the 2x-daily E175 provides ~54,000 annual seats. Local demand at ~53,000 already fills near capacity, so the meaningful Verdict 2 output is not "does the LF change" (it can't much) but "how is the passenger mix split between local and feed, and what does that mean for total contribution?"
+
+Public API:
+- `combined_pnl(local_pax, local_revenue, feed_pax, feed_revenue, seats_per_departure, freq_per_day, quarter_days, casm_cents) -> dict`
+
+### Module 4 — `layer2/verdict2.py`
+
+Orchestrator and Verdict 2 output. Runs feed extraction → feed shares → feed fare allocation → combined P&L → sensitivities → verdict.
+
+**Verdict 2 rule.** `verdict2` records the total contribution and the local-vs-feed split. There is no go/no-go flip here — Verdict 1 already established viability. Verdict 2 answers: what fraction of Delta's AUS-SLC economic case is local vs. feed?
+
+**Sensitivities.** Recomputes the mix under the same three axes as Verdict 1 (uplift 10–25%, recapture 10–30%, S-curve α 1.4–1.8), so the local-vs-feed split can be reported with error bars.
+
+**Output file `layer2/out/verdict2.json` schema:**
+
+Fields: `market` ("AUS-SLC"), `carrier` ("DL"), `local_contribution_annual_usd` (float, matches Verdict 1's contribution), `feed_contribution_annual_usd` (float, additional contribution from feed), `total_contribution_annual_usd` (float, sum), `feed_share_of_total_revenue` (float, 0-1), `feed_share_of_total_pax` (float, 0-1), `top_feed_markets` (list of objects with `endpoint`, `direction`, `passengers`, `revenue`, sorted by revenue descending, top 10), `local_vs_feed_by_sensitivity` (list of objects each with `uplift`, `recapture`, `alpha`, `local_pax`, `feed_pax`, `local_rev`, `feed_rev`), `generated_at` (ISO 8601 string).
+
+Runnable via `python -m layer2.verdict2`. Prints a human-readable summary to stdout: total feed itineraries extracted, top 10 feed markets by revenue, local-vs-feed passenger split, local-vs-feed revenue split, and the Layer 3 leverage note ("Layer 3's Shapley-vs-mileage attribution question has X% leverage on Delta's AUS-SLC economics" where X = feed revenue share).
+
+**Expected outcome.** Verdict 2 is expected to reveal that a non-trivial share of Delta's AUS-SLC economics comes from feed (plausibly 30–60% based on the fact that SLC is a genuine Delta hub connecting to a large Mountain West and West Coast network). The larger this share, the more leverage Layer 3's attribution question carries. If feed share is under 20%, Layer 3's attribution flip question would be small potatoes and worth flagging.
