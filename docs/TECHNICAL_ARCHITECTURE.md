@@ -310,3 +310,82 @@ Fields: `market` ("AUS-SLC"), `carrier` ("DL"), `local_contribution_annual_usd` 
 Runnable via `python -m layer2.verdict2`. Prints a human-readable summary to stdout: total feed itineraries extracted, top 10 feed markets by revenue, local-vs-feed passenger split, local-vs-feed revenue split, and the Layer 3 leverage note ("Layer 3's Shapley-vs-mileage attribution question has X% leverage on Delta's AUS-SLC economics" where X = feed revenue share).
 
 **Expected outcome.** Verdict 2 is expected to reveal that a non-trivial share of Delta's AUS-SLC economics comes from feed (plausibly 30–60% based on the fact that SLC is a genuine Delta hub connecting to a large Mountain West and West Coast network). The larger this share, the more leverage Layer 3's attribution question carries. If feed share is under 20%, Layer 3's attribution flip question would be small potatoes and worth flagging.
+
+---
+
+## Layer 3 — Shapley vs. mileage revenue attribution
+
+**Purpose.** Answer DESTER's central research question: does Delta's AUS-SLC verdict change depending on the connecting-revenue attribution regime? Specifically, replace Layer 2's provisional mileage-prorated feed revenue with a Shapley-value allocation, recompute the P&L, and compare.
+
+**Expected result (honest, per Layer 2's findings).** Given Layer 2 established that feed = 13% of Delta's AUS-SLC revenue, Verdict 3 is expected to *not* flip the go/no-go for this specific market. The Shapley-vs-mileage delta on the AUS-SLC segment is bounded by the feed layer's total size. The honest null result on the pre-registered market is a legitimate research finding; Layer 4 will apply the same three-verdict engine to a hub-heavy market where the attribution mechanism has more leverage.
+
+Consumes: `layer2/out/feed_itineraries.parquet`, `layer2/out/feed_economics.parquet`, `layer0/out/summary.json`, `layer0/data/Origin_and_Destination_Survey_DB1BMarket_2025_2.csv` (reparsed a third time with a new filter — SLC-beyond nonstop O&Ds), and `layer1/out/verdict1.json`.
+
+Produces: `layer3/out/standalone_fares.parquet`, `layer3/out/attribution_by_itinerary.parquet`, `layer3/out/verdict3.json`.
+
+Reuses Layer 0's raw DB1B file directly (third distinct filter over the same source). No new TranStats download.
+
+### Module 1 — `layer3/standalone_fares.py`
+
+Computes the singleton coalition values `v(A)` and `v(B)` that Shapley needs.
+
+`v(A)` — mean standalone fare for AUS-SLC on nonstop-only itineraries. Taken directly from Layer 0's `summary.json` as `mean_fare` filtered further to `MktCoupons == 1` at read time (Layer 0's summary already reports the mean over the full AUS-SLC parquet, which includes both nonstop and connecting itineraries; Layer 3 needs the nonstop-only value specifically because the singleton is priced as a standalone nonstop). Add a helper `standalone_fare_aus_slc(aus_slc_parquet_path) -> float` that computes this from the Layer 0 parquet in one pass.
+
+`v(B)` — for each unique `beyond_endpoint` observed in Layer 2's feed itineraries (Boise, Jackson Hole, Portland, etc.), compute the mean standalone fare on the SLC-endpoint nonstop O&D market by streaming the raw DB1B a third time, filtered to `MktCoupons == 1` and the correct market pair. Values below $50 or above $2,000 flagged as data-quality outliers (same reasoning as Wave 1's fare-distribution diagnostic).
+
+Public API:
+- `standalone_fare_aus_slc(aus_slc_parquet_path) -> float`
+- `standalone_fares_slc_beyond(db1b_csv_path, endpoints: list[str]) -> pd.DataFrame` — one row per endpoint with `mean_standalone_fare`, `n_observations`, `flagged` (bool).
+
+Writes `layer3/out/standalone_fares.parquet`.
+
+### Module 2 — `layer3/attribution.py`
+
+For each feed itinerary from Layer 2, computes both the mileage-prorated and Shapley-attributed AUS-SLC fare.
+
+**Mileage proration** (already computed by Layer 2, re-computed here for consistency and side-by-side comparison):
+`aus_slc_fare_mileage = MktFare * (AUS_SLC_MILES / total_market_miles)` where `AUS_SLC_MILES = 1085` (great-circle) and `total_market_miles` is the itinerary's `NonStopMiles`.
+
+**Shapley two-player attribution** on the coalition of segments `{A = AUS-SLC, B = SLC-beyond}`:
+- `v(A)` from Module 1.
+- `v(B)` from Module 1, joined on the itinerary's `beyond_endpoint`.
+- `v(A,B) = MktFare` (the connecting fare actually paid).
+- `phi_A = 0.5 * (v(A) + (v(A,B) - v(B)))` = AUS-SLC's Shapley-attributed fare.
+- `phi_B = 0.5 * (v(B) + (v(A,B) - v(A)))`.
+- `phi_A + phi_B = v(A,B)` by construction — the split is exact.
+
+**Negative Shapley values are reported honestly**, not floored at zero. This can occur when the connecting fare is unusually low relative to the sum of standalone fares (distressed inventory, promotional pricing, etc.). Floor-at-zero would hide a real economic phenomenon. Flag any itinerary with `phi_A < 0` in the output for transparency.
+
+**Attribution delta per itinerary**:
+`delta = phi_A - aus_slc_fare_mileage`. Positive means Shapley credits AUS-SLC more than mileage; negative means less.
+
+Public API:
+- `mileage_attribution(feed_itineraries_df, aus_slc_miles=1085) -> pd.Series`
+- `shapley_attribution(feed_itineraries_df, standalone_fares_df, v_a) -> pd.DataFrame` returning `phi_A`, `phi_B`, `phi_A_negative` (bool) per itinerary.
+- `attribute_all(feed_itineraries_df, standalone_fares_df, v_a) -> pd.DataFrame` combining both regimes.
+
+Writes `layer3/out/attribution_by_itinerary.parquet`.
+
+### Module 3 — `layer3/pnl_by_regime.py`
+
+Replays Layer 2's `combined_pnl` twice — once with feed revenue computed under mileage attribution, once under Shapley. Reuses `layer1.pnl.compute_delta_e175_casm` and `layer2.pnl_with_feed.combined_pnl` unchanged (cost side and combination logic are attribution-regime-neutral).
+
+Public API:
+- `pnl_by_regime(local_pax, local_revenue, feed_pax, feed_revenue_by_regime: dict, seats_per_departure, freq_per_day, quarter_days, casm_cents, distance_miles) -> dict` — returns both regime P&Ls in a single dict keyed by regime.
+
+### Module 4 — `layer3/verdict3.py`
+
+Orchestrator and Verdict 3 output. Runs standalone fares → attribution → both P&Ls → sensitivity grid → verdict comparison.
+
+**Verdict 3 rule.** `verdict3` reports both regime verdicts (go/no-go), the contribution under each regime, the attribution delta, the leverage percentage (`|contribution_shapley - contribution_mileage| / contribution_mileage`), and a `verdict_flipped` bool.
+
+**Sensitivities.** The same 48-combination grid used in Verdicts 1 and 2, run under both attribution regimes, so we can see whether any combination flips the verdict under one regime but not the other.
+
+**Output file `layer3/out/verdict3.json` schema:**
+
+
+Fields in `layer3/out/verdict3.json`: `market` ("AUS-SLC"), `carrier` ("DL"), `attribution_regimes` (list of two objects, one per regime, each with `regime` ("mileage" or "shapley"), `feed_revenue_annual_usd`, `total_revenue_annual_usd`, `total_contribution_annual_usd`, `expected_load_factor`, `breakeven_load_factor`, `verdict` ("go" or "no_go")), `attribution_delta_usd` (float, shapley minus mileage on contribution), `attribution_leverage_pct` (float, absolute delta divided by mileage contribution), `verdict_flipped` (bool), `negative_phi_a_count` (int, itineraries where the Shapley AUS-SLC allocation went negative), `sensitivities` (list of objects each with `uplift`, `recapture`, `alpha`, `regime`, `verdict`, `contribution`), and `generated_at` (ISO 8601 string).
+
+Runnable via `python -m layer3.verdict3`. Prints a human-readable summary to stdout: total feed itineraries attributed, mean and median Shapley-vs-mileage delta per itinerary, count of negative Shapley values, revenue and contribution under each regime, headline attribution leverage percentage, verdict under each regime, and whether the verdict flipped.
+
+If the verdict flips, flag it prominently. Given Layer 2's 13% feed leverage, a flip on AUS-SLC would be a genuinely surprising result worth diagnosing carefully before publication. If the verdict does not flip, that is the expected honest null result on the pre-registered market and should be reported cleanly, not apologetically. Layer 4 will characterize the mechanism in a market where the attribution mechanism has more leverage.
