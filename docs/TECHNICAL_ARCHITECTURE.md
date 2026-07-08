@@ -389,3 +389,55 @@ Fields in `layer3/out/verdict3.json`: `market` ("AUS-SLC"), `carrier` ("DL"), `a
 Runnable via `python -m layer3.verdict3`. Prints a human-readable summary to stdout: total feed itineraries attributed, mean and median Shapley-vs-mileage delta per itinerary, count of negative Shapley values, revenue and contribution under each regime, headline attribution leverage percentage, verdict under each regime, and whether the verdict flipped.
 
 If the verdict flips, flag it prominently. Given Layer 2's 13% feed leverage, a flip on AUS-SLC would be a genuinely surprising result worth diagnosing carefully before publication. If the verdict does not flip, that is the expected honest null result on the pre-registered market and should be reported cleanly, not apologetically. Layer 4 will characterize the mechanism in a market where the attribution mechanism has more leverage.
+
+---
+
+## Layer 4 — Second-market comparison
+
+**Purpose.** Apply DESTER's three-verdict engine to a second, hub-heavy connecting market where feed represents a substantially larger share of total revenue than AUS-SLC's 13%. Pair with the AUS-SLC findings to characterize *when* the attribution mechanism has enough leverage to flip a verdict, producing a concrete empirical bracket from two contrasting real markets.
+
+**Staged spec.** Layer 4 is built in two waves.
+
+- **Wave 1 (this section)** — market screener. Systematically scan the raw DB1B for candidate spoke-to-hub markets, compute each candidate's feed revenue share, return a ranked table. No verdict logic yet. Wave 2 is designed once Wave 1's output is on disk and reviewed.
+- **Wave 2 (placeholder)** — apply Verdicts 1-3 to the chosen market. Detailed spec written after Wave 1 results are inspected.
+
+### Wave 1 — Market screener
+
+Consumes: `layer0/data/Origin_and_Destination_Survey_DB1BMarket_2025_2.csv` (fourth distinct filter over the same source file).
+
+Produces: `layer4/out/market_screener.parquet`, `layer4/out/screener_summary.json`.
+
+Reuses Layer 0's raw DB1B file directly. No new TranStats download.
+
+#### Module 1 — `layer4/screener.py`
+
+Streams the raw DB1B in chunks (same pattern as Layer 0 and Layer 2), builds per-market accumulators for local and feed passenger counts and revenue, and returns a ranked candidate table.
+
+**Candidate market definition.** A market is a candidate if it is a **spoke-to-major-hub domestic O&D**:
+- One endpoint is on the top-10 US hub list: ATL, DFW, ORD, DEN, LAX, CLT, LAS, PHX, SEA, MSP.
+- The other endpoint is not on that list.
+- The market's dominant carrier — the carrier with the largest passenger share on the *local* itineraries (`MktCoupons == 1`) — holds at least 40% share.
+- Total sampled local passengers in the quarter is at least 500 (below that, share estimates are too noisy).
+
+**Feed extraction rule.** A feed itinerary for a candidate market is a `MktCoupons == 2` row whose `AirportGroup` contains both endpoints as an ordered subsequence, where the hub endpoint is the connecting airport. Same logical rule Layer 2 applied for AUS-SLC, generalized.
+
+**Feed share definition.** For each (candidate market, dominant carrier) pair:
+- `local_revenue = sum(MktFare * Passengers)` on nonstop rows for the dominant carrier.
+- `feed_revenue_allocated` = sum over feed itineraries touching that market of `MktFare * (segment_miles / total_miles) * Passengers * dominant_carrier_share_on_feed_market`. Provisional mileage proration (matching Layer 2's convention), applied here purely for screening — Wave 2 will use Shapley if the chosen market is built out.
+- `feed_share = feed_revenue_allocated / (local_revenue + feed_revenue_allocated)`.
+
+**Output ranking.** The full candidate list is returned ranked by `feed_share` ascending, so the reviewer can see the full distribution and identify natural gaps or clusters rather than pre-committing to a target band. A `flag_borderline` column marks rows with `0.25 <= feed_share <= 0.45` as candidates likely to be in the mechanism-flip zone, but the flag is diagnostic, not prescriptive.
+
+Public API:
+- `resolve_csv_path(pattern)` — same glob-and-error pattern used in Layers 0-3.
+- `stream_candidate_stats(db1b_csv_path, hub_airports: list[str], min_pax: int = 500) -> pd.DataFrame` streams the CSV and returns per-(market, dominant_carrier) accumulators.
+- `compute_feed_shares(candidate_stats_df) -> pd.DataFrame` adds `local_revenue`, `feed_revenue_allocated`, `feed_share`, `flag_borderline`.
+- `write_outputs(df, out_dir)` writes the ranked parquet plus a JSON summary noting total candidates screened, how many fell into the borderline band, the top 10 candidates by feed share overall, and the top 5 within the borderline band specifically.
+
+Runnable via `python -m layer4.screener`. Prints a human-readable summary to stdout: total markets screened, distribution of feed shares (as decile buckets), top 5 borderline candidates with their dominant carrier and feed share, and a flag if the borderline band is empty (would be a genuine finding — feed shares are bimodal — worth noting before Wave 2 is designed).
+
+**Success criteria for Wave 1.** The screener runs to completion on the 2 GB DB1B file without loading it fully into memory. The output parquet contains at least a few dozen candidate markets. Whether the borderline band contains any markets is an empirical question — either outcome is a valid Wave 1 result.
+
+### Wave 2 — Verdicts 1-3 on the chosen market *(placeholder; spec after Wave 1)*
+
+Applies the same three-verdict engine used for AUS-SLC to whichever borderline market is selected from Wave 1's ranked output. The four Layer 1 Wave 2 modules, the four Layer 2 modules, and the four Layer 3 modules are reused directly by import — Layer 4 Wave 2 is largely orchestration, not new implementation. Detailed spec written after Wave 1 output is reviewed.
