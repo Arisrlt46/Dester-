@@ -441,3 +441,88 @@ Runnable via `python -m layer4.screener`. Prints a human-readable summary to std
 ### Wave 2 — Verdicts 1-3 on the chosen market *(placeholder; spec after Wave 1)*
 
 Applies the same three-verdict engine used for AUS-SLC to whichever borderline market is selected from Wave 1's ranked output. The four Layer 1 Wave 2 modules, the four Layer 2 modules, and the four Layer 3 modules are reused directly by import — Layer 4 Wave 2 is largely orchestration, not new implementation. Detailed spec written after Wave 1 output is reviewed.
+
+### Wave 2 — Verdicts 1-3 on ATL-SAT (Delta)
+
+**Locked market.** Atlanta (ATL) - San Antonio (SAT), Delta Air Lines, DB1BMarket 2025 Q2. Selected from Wave 1's shortlist of borderline-feed-share markets structurally comparable to AUS-SLC (4,535 local sample passengers vs. AUS-SLC's 2,933; 58.5% Delta share; 35.6% feed share — solidly in the "healthy local base with real feed layer" band that makes the comparison legible).
+
+**Methodology principle.** Wave 2 applies the same three-verdict engine — same Wave 1 logit, same sizing/S-curve/spill/PnL modules, same feed extraction, same Shapley/mileage attribution — to ATL-SAT. Nothing is refit or re-tuned per market. The logit is the instrument being applied to two markets under identical methodology; refitting per market would defeat the comparison. This is the more honest research posture even though it means the logit is slightly out-of-distribution for ATL-SAT.
+
+Consumes: `layer0/data/Origin_and_Destination_Survey_DB1BMarket_2025_2.csv` (fifth distinct filter), `layer1/data/T_F41SCHEDULE_P52.csv`, `layer1/data/T_T100D_SEGMENT_US_CARRIER_ONLY.csv`, `layer1/out/logit_coefficients.json`, `layer4/out/market_screener.parquet`.
+
+Produces: `layer4/out/atl_sat_local.parquet`, `layer4/out/atl_sat_feed.parquet`, `layer4/out/atl_sat_attribution.parquet`, `layer4/out/verdict4.json`.
+
+Reuses Layer 0's raw DB1B file directly. No new TranStats download.
+
+#### Module 1 — `layer4/config.py`
+
+Market and aircraft constants centralized. Every ATL-SAT-specific value that was hardcoded to AUS-SLC in Layers 0-3 lives here as a module-level constant, so Wave 2 orchestrators can be written cleanly.
+
+Key constants: `MARKET_ORIGIN = "ATL"`, `MARKET_DEST = "SAT"`, `HUB = "ATL"`, `SPOKE = "SAT"`, `DOMINANT_CARRIER = "DL"`, `AIRCRAFT_SEATS_MIN = 100`, `AIRCRAFT_SEATS_MAX = 230` (wider than the E175's 70-82 band to allow mainline narrowbody like A220, 737, A319/A320), `PROPOSED_FREQ_DAILY` (computed from T-100 as Delta's actual observed 2025 Q2 daily frequency on ATL-SAT, rounded to nearest integer — not a hypothetical "proposed" service like AUS-SLC, since Delta already flies this).
+
+#### Module 2 — `layer4/aircraft_id.py`
+
+Generalizes `layer1.pnl.resolve_e175_aircraft_type_code` to a market-agnostic aircraft identifier.
+
+Public API:
+- `resolve_dominant_aircraft_type_code(carrier, seats_min, seats_max, t100_csv_path, p52_csv_path, year=2025, quarter=2)` returns `(aircraft_type_code, mean_seats_per_departure, mean_departure_distance)`. Filters T-100 to `(carrier, year, quarter, seats in [seats_min, seats_max])`, groups by `AIRCRAFT_TYPE`, and picks the code with the most departures. Also filters P-5.2 the same way to confirm the code exists on the cost side. Logs the identified code and its stats for verification.
+- Fallback: if the top code has substantially fewer departures than expected, or if multiple codes each represent >30% of departures, return the top code but log a "fleet-mixed" warning so downstream P&L is understood as an average across mix rather than a pure single-type computation.
+
+#### Module 3 — `layer4/verdict1_atl_sat.py`
+
+Verdict 1 on ATL-SAT. Imports Layer 1's `sizing`, `scurve`, `spill`, `pnl` modules unchanged. Feeds them ATL-SAT config values.
+
+The Layer 0 output parquet is AUS-SLC-specific, so this module builds its own ATL-SAT local dataframe by streaming raw DB1B with the ATL-SAT market-pair filter (same logic Layer 0 used for AUS-SLC, reused here with a different pair). Writes `layer4/out/atl_sat_local.parquet` as an intermediate.
+
+Uses Wave 1 logit unchanged to predict Delta's share on the ATL-SAT choice set. Same six features Wave 1 was trained on.
+
+Reports a Verdict 1 result and its parameters. Same 48-combination sensitivity grid as AUS-SLC's Verdict 1.
+
+#### Module 4 — `layer4/verdict2_atl_sat.py`
+
+Verdict 2 on ATL-SAT. Imports Layer 2's `feed_extraction`, `feed_economics`, `pnl_with_feed` modules unchanged. Feeds them ATL-SAT config values.
+
+Feed itineraries touching ATL-SAT extracted per Layer 2's rule generalized to arbitrary (hub, spoke): `MktCoupons == 2`, `AirportGroup` contains ATL and SAT with the hub as the connecting airport, market pair is not ATL-SAT.
+
+Writes `layer4/out/atl_sat_feed.parquet`.
+
+#### Module 5 — `layer4/verdict3_atl_sat.py`
+
+Verdict 3 on ATL-SAT. Imports Layer 3's `standalone_fares`, `attribution`, `pnl_by_regime` modules unchanged. Feeds them ATL-SAT config values.
+
+Standalone fares for feed itineraries' beyond endpoints computed by streaming raw DB1B a further pass, filtered to `MktCoupons == 1` and the correct market pairs.
+
+`v(A)` for ATL-SAT taken from Module 3's local parquet (mean nonstop fare on ATL-SAT).
+
+Writes `layer4/out/atl_sat_attribution.parquet`.
+
+#### Module 6 — `layer4/verdict4.py`
+
+**The orchestrator and the comparative payoff of the whole project.** Runs Modules 3-5 in order. Then produces the comparative summary that makes Layer 4 valuable as research.
+
+`verdict4.json` schema is the union of:
+1. Full ATL-SAT Verdict 1 output (matching Verdict 1's JSON shape).
+2. Full ATL-SAT Verdict 2 output (matching Verdict 2's JSON shape).
+3. Full ATL-SAT Verdict 3 output (matching Verdict 3's JSON shape).
+4. A **`comparative_summary`** section: for each metric that matters for the research question, the AUS-SLC value (read from Layers 1-3's existing JSON outputs) alongside the ATL-SAT value.
+
+The comparative metrics: local market size, feed share of revenue, predicted dominant carrier share, expected load factor, Verdict 1 verdict, Verdict 2 total contribution, Verdict 3 mileage vs. Shapley contribution and delta, Verdict 3 leverage percent, Verdict 3 flip status.
+
+Prints a human-readable stdout summary in this shape:
+AUS-SLC (2025 Q2)    ATL-SAT (2025 Q2)
+Local sample passengers  2,933                4,535
+Feed share of revenue    13.2%                XX.X%
+Delta share (predicted)  20.1%                XX.X%
+Expected load factor     97.1%                XX.X%
+Verdict 1                GO                   XX
+Contribution (mileage)   $11.09M              $XX.XXM
+Contribution (Shapley)   $10.45M              $XX.XXM
+Attribution leverage     5.74%                XX.XX%
+Verdict flipped?         NO                   XX
+=== DESTER research finding ===
+[One-line conclusion about the attribution mechanism's leverage across the two markets, generated from the actual numbers.]
+If the verdict flips on ATL-SAT under Shapley but not mileage (or vice versa), flag it prominently — that would be the positive result on the second market that pairs with AUS-SLC's null result to characterize the mechanism empirically.
+
+If the verdict does not flip on ATL-SAT either, report that honestly — the empirical bracket then becomes "the mechanism does not flip verdicts at feed shares up to 35.6% on comparable healthy markets." Still a real finding.
+
+Runnable via `python -m layer4.verdict4`.
