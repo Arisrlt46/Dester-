@@ -169,3 +169,15 @@ cat >> docs/PROBLEMS_AND_SOLUTIONS.md << 'EOF'
 **Finding (structural feature of DB1B on thin spokes):** 47.8% of ATL-SAT's 5,428 feed itineraries (accounting for 55% of feed passengers) have no standalone fare data at all — SAT lacks nonstop service to most of the cities passengers reach via ATL connections. Verified directly: e.g. SAT-BHM has 860 raw DB1B rows and zero nonstops. Categorically different from AUS-SLC's 1-of-2,572 edge case (Rapid City, resolved by mileage fallback).
 **Consequence:** For roughly half of ATL-SAT's feed itineraries, `v(B)` is undefined and Shapley collapses to mileage-equivalent. The Shapley mechanism has structurally less to act on in thin-spoke markets — even a well-calibrated share model wouldn't fully rescue Shapley leverage on ATL-SAT.
 **Implication for future work:** DB1BMarket alone is insufficient for full Shapley attribution on thin-spoke markets. A more complete analysis would need to estimate standalone `v(B)` for missing nonstop pairs — via a per-mile yield model calibrated on markets that do have nonstop data, or via an alternate data source (T-100 revenue-per-passenger by segment). Not a Wave 1 iteration priority, but worth documenting as a known limitation of DESTER's current data foundation.
+
+---
+
+## CPA markup refinement (closes documented limitation)
+
+**Refinement:** Applied the previously-documented 12% capacity-purchase-agreement markup to SkyWest's raw CASM (6.566 cents/ASM) to estimate Delta's effective cost basis (7.354 cents/ASM). Ran the three-verdict engine end-to-end under the marked-up cost.
+
+**Method:** Additive artifact under `layer{1,2,3}/cpa_markup/`. Pre-existing pre-registered outputs (`verdict1.json`, `verdict2.json`, `verdict3.json`) stay untouched as the historical record. New files `verdict{1,2,3}_cpa.json` sit alongside for comparison.
+
+**Result:** All three verdicts hold GO under the more conservative cost basis. V1 contribution drops from $9.10M to $8.61M. V2 total contribution from $11.09M to $10.60M. V3 attribution leverage rises slightly from 5.74% to 6.00% (Shapley acting on a smaller base). Nothing flips.
+
+**Internal-consistency check:** The pre-existing P&S note predicted "~7.35 cents/ASM" via back-of-envelope reasoning before this code existed. The actual pipeline delivers 7.354 cents/ASM. The near-exact match validates that DESTER's methodology is well-enough understood to predict its own outputs.
