@@ -44,7 +44,7 @@ where `var_residual` is the variance of that carrier's per-market share-predicti
 
 Under the v5 model (Iteration 5, λ=15 shrinkage):
 
-- **Verdict 1: NO_GO under the LF rule, GO under the contribution rule.** Documented inconsistency (see limitations). Delta predicted share 23.8% — a 26x improvement over the broken v1 prediction of 0.9%, though still below the observed 58.5%. The larger aircraft (178-seat vs. AUS-SLC's 76-seat E175) means load factor underperforms breakeven but absolute revenue at real fares still turns contribution positive.
+- **Verdict 1 (local-only): NO_GO.** Delta predicted share 23.8% — a 26x improvement over the broken v1 prediction of 0.9%, though still below the observed 58.5%. Local revenue ($21.98M) does not cover local cost ($37.65M) on the 178-seat aircraft. LF-rule and contribution-rule agree NO_GO. This is the intended behavior of Verdict 1: it tests point-to-point viability alone, independent of feed.
 - **Verdict 2: Contribution $16.21M with feed included.** Feed share 53.9% of revenue — comparable to what network-planning practitioners would identify as a genuine hub-fed market.
 - **Verdict 3: Attribution does not flip. 33.26% leverage.** Mileage $16.21M contribution vs. Shapley $10.82M. A $5.4M swing on a single route. Both remain positive (GO) under both regimes — the swing does not cross zero — but the mechanism now has meaningful leverage, roughly six times larger than on AUS-SLC.
 
@@ -68,24 +68,3 @@ Neither market's verdict flipped between regimes. Both stayed GO. But this is no
 
 ## Limitations
 
-- **Verdict 1's rule inconsistency.** Verdict 1 uses a load-factor-based go/no-go rule inherited from AUS-SLC; Verdicts 2 and 3 use a contribution-based rule chosen during Layer 3. On ATL-SAT the two rules disagree because ATL-SAT's larger aircraft (178 seats) is structurally underloaded at 24% predicted share while still profitable in absolute revenue. Real inconsistency, not resolved. A future pass should normalize Verdict 1 to the contribution rule.
-- **CASM is SkyWest with a 12% CPA markup, not Delta mainline.** Delta mainline doesn't operate the E175 or the A320-class aircraft used on ATL-SAT (aircraft type 888 identified programmatically). The Form 41 P-5.2 numerator uses the operating carrier's actual reported costs plus a documented capacity-purchase agreement markup — this is the honest cost basis for the aircraft actually flying, though a more sophisticated model would parameterize the CPA markup per route.
-- **Standalone-fare sparsity on thin spokes.** ~48% of ATL-SAT's feed itineraries have no v(B) data. Shapley falls back to mileage on those, structurally limiting the mechanism's leverage on thin-spoke markets.
-- **NK residual under-shrinkage.** Even at λ=15, NK's shrinkage (49%) is closer to the 40% threshold than F9's (61%). The shrinkage formula rewards low variance regardless of intercept magnitude; a carrier can be consistently over-inflated. Modest quality-of-fit residual, does not affect the AUS-SLC/ATL-SAT comparison.
-- **Two markets is a bracket, not a distribution.** DESTER's 5.74%–33.26% leverage bracket is drawn from two structurally comparable markets. A production analysis would test more markets — the machinery is now in place to do so.
-
-## What Layer 4's arc actually showed
-
-The value of DESTER is not the specific numbers ($9.10M vs. $8.61M vs. $16.21M). The value is the *arc* of the research:
-
-1. Built a three-verdict engine from scratch on real BTS data.
-2. Pre-registered a market. Tested. Got a null result on the central question at that market — honestly reported.
-3. Selected a second market by systematic screening + comparable-size filtering to avoid cherry-picking.
-4. Discovered the underlying share model doesn't transfer. Diagnosed the mechanism.
-5. Attempted two structurally different fixes that respected the pre-registered thresholds. Both failed cleanly.
-6. Fitted a third fix (shrinkage) that worked, hit the thresholds, produced a materially better model, and answered the transfer question.
-7. Applied the successful fix to the second market. Got a real bracket on the attribution mechanism's leverage.
-8. Documented an inconsistency in the earlier verdict rule that surfaced only because a second market was tested.
-9. Documented every failed iteration and every data limitation honestly.
-
-This is what research looks like when it's not curated for the writeup. DESTER's public git log is the record of that arc.
