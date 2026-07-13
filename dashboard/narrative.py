@@ -14,17 +14,24 @@ from dashboard import data_loader
 LOW_LEVERAGE_THRESHOLD = 0.20
 
 
+def _escape_dollars(text):
+    """Streamlit's st.markdown/st.info treat unescaped $...$ as LaTeX math
+    delimiters -- "$9.1M" mid-sentence gets parsed as a math span and
+    mangled. Escape every literal $ so dollar figures render as plain text."""
+    return text.replace("$", "\\$")
+
+
 def _regime_lookup(verdict3):
     return {r["regime"]: r for r in (verdict3.get("attribution_regimes") or [])}
 
 
 def generate_verdict_narrative(market, verdict1, verdict2, verdict3, regime, uplift, recapture, alpha):
     if not verdict1 or not verdict2 or not verdict3:
-        return f"No complete verdict data available for {market} at this parameter combination."
+        return _escape_dollars(f"No complete verdict data available for {market} at this parameter combination.")
 
     regimes_headline = _regime_lookup(verdict3)
     if "mileage" not in regimes_headline or "shapley" not in regimes_headline:
-        return f"No attribution-regime data available for {market}."
+        return _escape_dollars(f"No attribution-regime data available for {market}.")
 
     sensitivities = verdict3.get("sensitivities") or []
     sens_mileage = data_loader.nearest_sensitivity(sensitivities, uplift, recapture, alpha, regime="mileage")
@@ -60,7 +67,7 @@ def generate_verdict_narrative(market, verdict1, verdict2, verdict3, regime, upl
     flipped = verdict_mileage != verdict_shapley
 
     if flipped:
-        return (
+        return _escape_dollars(
             f"At these parameters, the attribution regime flips the verdict on {market} -- "
             f"{'GO' if verdict_mileage == 'go' else 'NO_GO'} under mileage proration, "
             f"{'GO' if verdict_shapley == 'go' else 'NO_GO'} under Shapley value. "
@@ -97,4 +104,6 @@ def generate_verdict_narrative(market, verdict1, verdict2, verdict3, regime, upl
             f"connecting itineraries."
         )
 
-    return f"At these parameters, Delta's {market} route is {verdict_label}. {driver_sentence} {attribution_sentence}"
+    return _escape_dollars(
+        f"At these parameters, Delta's {market} route is {verdict_label}. {driver_sentence} {attribution_sentence}"
+    )
