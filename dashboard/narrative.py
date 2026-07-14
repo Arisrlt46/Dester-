@@ -25,7 +25,25 @@ def _regime_lookup(verdict3):
     return {r["regime"]: r for r in (verdict3.get("attribution_regimes") or [])}
 
 
-def generate_verdict_narrative(market, verdict1, verdict2, verdict3, regime, uplift, recapture, alpha):
+def _build_comparison_sentence(market, comparison_context):
+    """comparison_context: {other_market: {"attribution_leverage_pct": float,
+    "verdict_flipped": bool}, ...} for DESTER's other featured markets.
+    Symmetric -- works regardless of which of the three markets is
+    currently selected, not just MIA-SEA."""
+    if not comparison_context:
+        return ""
+    parts = []
+    for other_market, ctx in comparison_context.items():
+        if other_market == market or not ctx:
+            continue
+        flip_desc = "flipped" if ctx.get("verdict_flipped") else "did not flip"
+        parts.append(f"{other_market} shows {ctx['attribution_leverage_pct']:.0%} leverage ({flip_desc})")
+    if not parts:
+        return ""
+    return f"For context, across DESTER's featured markets: {'; '.join(parts)}."
+
+
+def generate_verdict_narrative(market, verdict1, verdict2, verdict3, regime, uplift, recapture, alpha, comparison_context=None):
     if not verdict1 or not verdict2 or not verdict3:
         return _escape_dollars(f"No complete verdict data available for {market} at this parameter combination.")
 
@@ -67,12 +85,14 @@ def generate_verdict_narrative(market, verdict1, verdict2, verdict3, regime, upl
     flipped = verdict_mileage != verdict_shapley
 
     if flipped:
+        comparison_sentence = _build_comparison_sentence(market, comparison_context)
         return _escape_dollars(
             f"At these parameters, the attribution regime flips the verdict on {market} -- "
             f"{'GO' if verdict_mileage == 'go' else 'NO_GO'} under mileage proration, "
             f"{'GO' if verdict_shapley == 'go' else 'NO_GO'} under Shapley value. "
             f"This is the exact mechanism DESTER was built to detect: whether the rule used to split "
             f"connecting-passenger revenue between segments can change a route's go/no-go decision."
+            + (f" {comparison_sentence}" if comparison_sentence else "")
         )
 
     spoke = market.split("-")[-1]
@@ -104,6 +124,8 @@ def generate_verdict_narrative(market, verdict1, verdict2, verdict3, regime, upl
             f"connecting itineraries."
         )
 
+    comparison_sentence = _build_comparison_sentence(market, comparison_context)
     return _escape_dollars(
         f"At these parameters, Delta's {market} route is {verdict_label}. {driver_sentence} {attribution_sentence}"
+        + (f" {comparison_sentence}" if comparison_sentence else "")
     )

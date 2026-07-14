@@ -4,15 +4,18 @@ loaded data, return a go.Figure. No I/O, no recomputation."""
 import plotly.graph_objects as go
 
 from dashboard import data_loader
+from dashboard.styles import COLORS, PLOTLY_TEMPLATE, teal_gradient
 
-MARKETS = ["AUS-SLC", "ATL-SAT"]
-PRIMARY_VARIANT = {"AUS-SLC": "original", "ATL-SAT": "v5 (final)"}
+MARKETS = ["AUS-SLC", "ATL-SAT", "MIA-SEA"]
+PRIMARY_VARIANT = {"AUS-SLC": "original", "ATL-SAT": "v5 (final)", "MIA-SEA": "v5 (final)"}
+MARKET_COLOR = {"AUS-SLC": COLORS["teal"], "ATL-SAT": COLORS["amber"], "MIA-SEA": COLORS["violet"]}
 
 
 def two_market_comparison_chart(data, regime):
     """Grouped bars: local revenue, feed revenue, cost, contribution -- side
-    by side for AUS-SLC and ATL-SAT, each market's primary (headline)
-    variant."""
+    by side for every featured market (AUS-SLC/ATL-SAT/MIA-SEA), each
+    market's primary (headline) variant. Name kept for compatibility with
+    existing callers; the loop below already handles any MARKETS length."""
     metrics = ["Local revenue", "Feed revenue", "Cost", "Contribution"]
     fig = go.Figure()
 
@@ -31,23 +34,31 @@ def two_market_comparison_chart(data, regime):
         contribution = regime_entry["total_contribution_annual_usd"]
 
         fig.add_trace(
-            go.Bar(name=market, x=metrics, y=[local_revenue, feed_revenue, cost, contribution])
+            go.Bar(
+                name=market,
+                x=metrics,
+                y=[local_revenue, feed_revenue, cost, contribution],
+                marker_color=MARKET_COLOR[market],
+            )
         )
 
     fig.update_layout(
+        template=PLOTLY_TEMPLATE,
         barmode="group",
         title=f"Local vs. feed economics ({regime} attribution)",
         yaxis_title="USD / year",
+        legend_title_text="Market",
     )
     return fig
 
 
 def leverage_chart(data):
     """Horizontal bar of attribution leverage % per market's primary
-    variant, with a vertical line at 100% marking the theoretical
-    verdict-flip threshold (leverage exceeding the mileage-regime
-    contribution's own magnitude)."""
-    labels, values = [], []
+    variant (one bar per featured market), with a vertical line at 100%
+    marking the theoretical verdict-flip threshold (leverage exceeding the
+    mileage-regime contribution's own magnitude). Bars use each market's own
+    MARKET_COLOR so the identity link to the comparison chart above holds."""
+    labels, values, colors = [], [], []
     for market in MARKETS:
         variant = PRIMARY_VARIANT[market]
         v3 = data_loader.get_verdict3(data, market, variant)
@@ -55,10 +66,30 @@ def leverage_chart(data):
             continue
         labels.append(market)
         values.append(v3["attribution_leverage_pct"] * 100)
+        colors.append(MARKET_COLOR[market])
 
-    fig = go.Figure(go.Bar(x=values, y=labels, orientation="h", text=[f"{v:.1f}%" for v in values], textposition="auto"))
-    fig.add_vline(x=100, line_dash="dash", line_color="red", annotation_text="verdict flip threshold (100%)")
-    fig.update_layout(title="Attribution leverage (Shapley vs. mileage)", xaxis_title="Leverage (%)")
+    fig = go.Figure(
+        go.Bar(
+            x=values,
+            y=labels,
+            orientation="h",
+            text=[f"{v:.1f}%" for v in values],
+            textposition="auto",
+            marker_color=colors,
+        )
+    )
+    fig.add_vline(
+        x=100,
+        line_dash="dash",
+        line_color=COLORS["text_secondary"],
+        annotation_text="verdict flip threshold (100%)",
+        annotation_font_color=COLORS["text_secondary"],
+    )
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        title="Attribution leverage (Shapley vs. mileage)",
+        xaxis_title="Leverage (%)",
+    )
     return fig
 
 
@@ -71,17 +102,50 @@ def feed_waterfall_chart(verdict2_dict, top_n=10):
     rows = sorted(verdict2_dict["top_feed_markets"], key=lambda r: r["revenue"], reverse=True)[:top_n]
     labels = [f"{r['endpoint']} ({r['direction']})" for r in rows]
     values = [r["revenue"] for r in rows]
+    total = sum(values)
 
-    fig = go.Figure(
-        go.Waterfall(
-            x=labels + ["Total (top {})".format(top_n)],
-            y=values + [None],
-            measure=["relative"] * len(values) + ["total"],
-            text=[f"${v:,.0f}" for v in values] + [f"${sum(values):,.0f}"],
+    # go.Waterfall's marker only accepts single increasing/decreasing/totals
+    # colors, not a per-point array, so a true gradient is built by hand:
+    # stacked Bar traces with an explicit running `base`, giving the same
+    # step-up waterfall shape with independent per-bar fill. Darkest shade =
+    # largest endpoint, lightest = smallest; the total bar is one shade
+    # darker than the darkest step.
+    bar_shades = list(reversed(teal_gradient(len(values))))
+    bases = []
+    running = 0
+    for v in values:
+        bases.append(running)
+        running += v
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=labels,
+            y=values,
+            base=bases,
+            marker_color=bar_shades,
+            text=[f"${v:,.0f}" for v in values],
             textposition="outside",
+            showlegend=False,
         )
     )
-    fig.update_layout(title=f"Top {top_n} feed endpoints by revenue", yaxis_title="USD / year")
+    fig.add_trace(
+        go.Bar(
+            x=[f"Total (top {top_n})"],
+            y=[total],
+            base=[0],
+            marker_color=[COLORS["teal_dark"]],
+            text=[f"${total:,.0f}"],
+            textposition="outside",
+            showlegend=False,
+        )
+    )
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        title=f"Top {top_n} feed endpoints by revenue",
+        yaxis_title="USD / year",
+        showlegend=False,
+    )
     return fig
 
 
@@ -124,13 +188,17 @@ def sensitivity_heatmap(sensitivities, alpha, regime, uplift_grid=None, recaptur
             y=[f"{r:.0%}" for r in recapture_grid],
             text=text,
             texttemplate="%{text}",
-            colorscale=[[0, "#d9534f"], [1, "#5cb85c"]],
+            textfont=dict(color=COLORS["text_primary"]),
+            colorscale=[[0, COLORS["amber"]], [1, COLORS["teal"]]],
             showscale=False,
             zmin=0,
             zmax=1,
+            xgap=2,
+            ygap=2,
         )
     )
     fig.update_layout(
+        template=PLOTLY_TEMPLATE,
         title=f"Verdict grid at alpha={snapped_alpha}{' (' + regime + ')' if has_regime else ''}",
         xaxis_title="Stimulation uplift",
         yaxis_title="Recapture rate",

@@ -47,6 +47,24 @@ _VARIANT_PATHS = {
             "verdict1": os.path.join(ROOT, "layer4", "out", "verdict1_atl_sat_norm.json"),
         },
     },
+    # MIA-SEA ships with a single model variant today -- the other three
+    # keys are declared (matching ATL-SAT's shape) so they light up for free
+    # if those files are ever added later, but right now only "v5 (final)"
+    # resolves; the rest degrade gracefully via the any(...) check below.
+    "MIA-SEA": {
+        "v5 (final)": {
+            "merged": os.path.join(ROOT, "layer4", "out", "verdict4_mia_sea.json"),
+        },
+        "v1 (pre-shrinkage)": {
+            "merged": os.path.join(ROOT, "layer4", "out", "verdict4_mia_sea_v1.json"),
+        },
+        "v5 + rule-normalized": {
+            "verdict1": os.path.join(ROOT, "layer4", "out", "verdict1_mia_sea_v5_norm.json"),
+        },
+        "v1 + rule-normalized": {
+            "verdict1": os.path.join(ROOT, "layer4", "out", "verdict1_mia_sea_norm.json"),
+        },
+    },
 }
 
 _DOCS_PATHS = {

@@ -19,6 +19,11 @@ COLORS = {
     "teal_dark": "#0e7490",
     "amber": "#f59e0b",
     "amber_dark": "#b45309",
+    # Third categorical hue, added for the three-market comparison charts
+    # (AUS-SLC/ATL-SAT/MIA-SEA). Validated alongside teal+amber via the
+    # dataviz skill's palette validator (lightness band, chroma floor, CVD
+    # separation all pass) -- still no red/green.
+    "violet": "#7c3aed",
     "bg": "#f9fafb",
     "surface": "#ffffff",
     "border": "#e5e7eb",

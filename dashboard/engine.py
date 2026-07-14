@@ -28,6 +28,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 LOCAL_AGG_PATH = os.path.join(DATA_DIR, "db1b_local_agg.parquet")
 FEED_AGG_PATH = os.path.join(DATA_DIR, "db1b_feed_agg.parquet")
+CATALOG_SUMMARY_PATH = os.path.join(DATA_DIR, "catalog_summary.parquet")
 
 LOGIT_COEFFICIENTS_PATH = os.path.join(PROJECT_ROOT, "layer1", "out", "logit_coefficients_v5_lambda15.json")
 T100_CSV_PATH = os.path.join(PROJECT_ROOT, "layer1", "data", "T_T100D_SEGMENT_US_CARRIER_ONLY.csv")
@@ -88,6 +89,29 @@ def _load_coefficients():
     if "coefficients" not in _CACHE:
         _CACHE["coefficients"] = layer1_logit.load_coefficients(LOGIT_COEFFICIENTS_PATH)
     return _CACHE["coefficients"]
+
+
+def _load_t100_features():
+    """Cached wrapper around layer1.calibration.load_t100_features, which
+    re-reads and re-aggregates the 120MB T-100 CSV from scratch on every
+    call -- fine for a single point estimate (run_dester_engine's original
+    10-second budget), but the dominant cost by ~2 orders of magnitude when
+    called dozens of times per market across a sensitivity-grid precompute.
+    Same data every call (the CSV path and filters are constants), so it's
+    cached here rather than in the frozen layer1/ module."""
+    if "t100_features" not in _CACHE:
+        _CACHE["t100_features"] = layer1_calibration.load_t100_features(T100_CSV_PATH)
+    return _CACHE["t100_features"]
+
+
+def _cached_airport_carrier_share(local_df):
+    """Same cache rationale as _load_t100_features: this is a national
+    groupby over the whole local aggregate, identical for every call in a
+    process regardless of which market is being scored, so it's wasteful to
+    redo per call across a batch precompute."""
+    if "airport_carrier_share" not in _CACHE:
+        _CACHE["airport_carrier_share"] = _airport_carrier_share(local_df)
+    return _CACHE["airport_carrier_share"]
 
 
 def _airport_carrier_share(local_df):
@@ -253,8 +277,19 @@ def _verdict_from_contribution(total_contribution):
     return "go" if total_contribution >= 0 else "no_go"
 
 
-def run_dester_engine(origin, dest, carrier=None, uplift=0.15, recapture=0.15, alpha=1.6, casm_markup=1.12, shrinkage_lambda=15.0):
-    origin, dest = origin.upper(), dest.upper()
+def _resolve_market_context(origin, dest, carrier, casm_markup):
+    """Everything about a market that does NOT depend on (uplift, recapture,
+    alpha): choice-set/logit prediction, aircraft/CASM resolution, and the
+    full feed-attribution loop (share, phi_a, mileage_fare are all pure
+    functions of the aggregate, independent of the sizing-grid params).
+
+    Split out from run_dester_engine so a sensitivity-grid precompute can
+    resolve this once per market and cheaply re-score 48 (uplift, recapture,
+    alpha) combinations against it, instead of redoing this -- by far the
+    most expensive part of a call, dominated by the feed loop's per-endpoint
+    DataFrame scans -- on every grid point. run_dester_engine itself still
+    returns byte-for-byte the same output as before this split; only the
+    internal call path changed."""
     local_df = _load_local_agg()
 
     market_mask = ((local_df["Origin"] == origin) & (local_df["Dest"] == dest)) | (
@@ -279,8 +314,8 @@ def run_dester_engine(origin, dest, carrier=None, uplift=0.15, recapture=0.15, a
     mean_fare = float(market_local_df["sum_fare_x_passengers"].sum() / max(market_local_df["sum_passengers"].sum(), 1e-9))
     distance_miles = float(market_local_df["sum_mktdistance_x_passengers"].sum() / max(market_local_df["sum_passengers"].sum(), 1e-9))
 
-    t100_freq_features = layer1_calibration.load_t100_features(T100_CSV_PATH)
-    airport_carrier_share = _airport_carrier_share(local_df)
+    t100_freq_features = _load_t100_features()
+    airport_carrier_share = _cached_airport_carrier_share(local_df)
     choice_set = _build_choice_set(market_local_df, t100_freq_features, airport_carrier_share)
 
     if choice_set.empty or carrier not in set(choice_set["carrier"]):
@@ -291,25 +326,10 @@ def run_dester_engine(origin, dest, carrier=None, uplift=0.15, recapture=0.15, a
     predicted_share = float(predicted[choice_set["carrier"] == carrier].iloc[0])
 
     base_pax = float(market_local_df["sum_passengers"].sum()) * ANNUALIZATION_FACTOR
-    sized_pax = base_pax * (1 + uplift)
 
     aircraft_type, seats_per_departure, casm_cents, aircraft_fallback_used = _resolve_aircraft_and_casm(carrier, origin, dest, casm_markup)
     if casm_cents is None:
         return {"error": f"No aircraft/CASM data available for {carrier} in the {AIRCRAFT_SEATS_MIN}-{AIRCRAFT_SEATS_MAX} seat band"}
-
-    mean_daily_pax = sized_pax * predicted_share / DAYS_PER_YEAR
-    boardings = _expected_boardings(mean_daily_pax, seats_per_departure, DEFAULT_FREQ_DAILY, recapture)
-
-    capacity_seats_annual = seats_per_departure * DEFAULT_FREQ_DAILY * DAYS_PER_YEAR
-    asms = capacity_seats_annual * distance_miles
-    full_capacity_revenue = capacity_seats_annual * mean_fare
-    cost = asms * (casm_cents / 100.0)
-    breakeven_lf = cost / full_capacity_revenue if full_capacity_revenue > 0 else float("inf")
-
-    expected_annual_boarded = boardings["expected_boarded"] * DAYS_PER_YEAR
-    revenue = expected_annual_boarded * mean_fare
-    contribution = revenue - cost
-    verdict1_result = _verdict_from_contribution(contribution)
 
     # ---------------- Verdict 2: feed ----------------
     feed_df = _load_feed_agg()
@@ -336,23 +356,36 @@ def run_dester_engine(origin, dest, carrier=None, uplift=0.15, recapture=0.15, a
         endpoints = sorted(feed_market_df["beyond_endpoint"].unique())
         v_a = mean_fare  # market's own nonstop mean fare, standalone coalition value
 
+        # Both of these were originally one boolean mask over the full
+        # 416K-row local_df PER endpoint (~85 endpoints/market on average,
+        # ~90ms each) -- the dominant cost of a call by ~2 orders of
+        # magnitude. Vectorized here into one filter + groupby each,
+        # indexed by "other" endpoint, then looked up per beyond below.
+        # Numerically identical to the original per-endpoint masks --
+        # verified against reference outputs captured before this change.
+        spoke_mask = (local_df["Origin"] == spoke) | (local_df["Dest"] == spoke)
+        spoke_df = local_df[spoke_mask]
+        spoke_other = np.where(spoke_df["Origin"] == spoke, spoke_df["Dest"], spoke_df["Origin"])
+        total_sub_pax_by_beyond = spoke_df.groupby(spoke_other)["sum_passengers"].sum()
+        dominant_sub_pax_by_beyond = spoke_df[spoke_df["OpCarrier"] == carrier].groupby(
+            spoke_other[spoke_df["OpCarrier"].values == carrier]
+        )["sum_passengers"].sum()
+        share_by_beyond = (dominant_sub_pax_by_beyond / total_sub_pax_by_beyond).reindex(total_sub_pax_by_beyond.index).fillna(0.0)
+
+        hub_nonstop_mask = (local_df["MktCoupons"] == 1) & ((local_df["Origin"] == hub) | (local_df["Dest"] == hub))
+        hub_df = local_df[hub_nonstop_mask]
+        hub_other = np.where(hub_df["Origin"] == hub, hub_df["Dest"], hub_df["Origin"])
+        vb_pax_by_beyond = hub_df.groupby(hub_other)["sum_passengers"].sum()
+        vb_farepax_by_beyond = hub_df.groupby(hub_other)["sum_fare_x_passengers"].sum()
+        v_b_by_beyond = (vb_farepax_by_beyond / vb_pax_by_beyond)[vb_pax_by_beyond > 0]
+
         for beyond in endpoints:
-            submarket = _market_pair(spoke, beyond)
-            sub_mask = ((local_df["Origin"] == spoke) & (local_df["Dest"] == beyond)) | (
-                (local_df["Origin"] == beyond) & (local_df["Dest"] == spoke)
-            )
-            sub_df = local_df[sub_mask]
-            total_sub_pax = float(sub_df["sum_passengers"].sum())
-            dominant_sub_pax = float(sub_df.loc[sub_df["OpCarrier"] == carrier, "sum_passengers"].sum())
-            share = (dominant_sub_pax / total_sub_pax) if total_sub_pax > 0 else 0.0
+            total_sub_pax = float(total_sub_pax_by_beyond.get(beyond, 0.0))
+            share = float(share_by_beyond.get(beyond, 0.0)) if total_sub_pax > 0 else 0.0
 
             # v(B): standalone nonstop mean fare on (hub, beyond) -- if unavailable, fall back to mileage.
-            vb_mask = ((local_df["Origin"] == hub) & (local_df["Dest"] == beyond) & (local_df["MktCoupons"] == 1)) | (
-                (local_df["Origin"] == beyond) & (local_df["Dest"] == hub) & (local_df["MktCoupons"] == 1)
-            )
-            vb_df = local_df[vb_mask]
-            vb_pax = float(vb_df["sum_passengers"].sum())
-            v_b = float(vb_df["sum_fare_x_passengers"].sum() / vb_pax) if vb_pax > 0 else None
+            v_b = v_b_by_beyond.get(beyond)
+            v_b = float(v_b) if v_b is not None and not pd.isna(v_b) else None
             has_v_b = v_b is not None and FARE_OUTLIER_MIN_USD <= v_b <= FARE_OUTLIER_MAX_USD
 
             for direction in feed_market_df.loc[feed_market_df["beyond_endpoint"] == beyond, "direction"].unique():
@@ -384,7 +417,67 @@ def run_dester_engine(origin, dest, carrier=None, uplift=0.15, recapture=0.15, a
                 feed_revenue_mileage_annual += delta_feed_pax * mileage_fare * ANNUALIZATION_FACTOR
                 feed_revenue_shapley_annual += delta_feed_pax * phi_a * ANNUALIZATION_FACTOR
 
+    market_label = _market_pair(origin, dest)
+
+    return {
+        "market": market_label,
+        "origin": origin,
+        "dest": dest,
+        "carrier": carrier,
+        "mean_fare": mean_fare,
+        "distance_miles": distance_miles,
+        "base_pax": base_pax,
+        "predicted_share": predicted_share,
+        "aircraft_type": aircraft_type,
+        "seats_per_departure": seats_per_departure,
+        "casm_cents": casm_cents,
+        "aircraft_fallback_used": aircraft_fallback_used,
+        "hub": hub,
+        "spoke": spoke,
+        "feed_pax_annual": feed_pax_annual,
+        "feed_revenue_mileage_annual": feed_revenue_mileage_annual,
+        "feed_revenue_shapley_annual": feed_revenue_shapley_annual,
+        "negative_phi_a_count": negative_phi_a_count,
+        "fallback_v_b_count": fallback_v_b_count,
+        "total_feed_rows": total_feed_rows,
+    }
+
+
+def _score_grid_point(context, uplift, recapture, alpha):
+    """Cheap arithmetic-only scoring of one (uplift, recapture, alpha) grid
+    point against an already-resolved market context. No DataFrame scans --
+    safe to call dozens of times per market. Note: alpha has no effect on
+    this engine's output (it never implements the real pipeline's S-curve;
+    accepted only for signature parity with run_dester_engine) -- a
+    pre-existing property of the simplified on-demand engine, not something
+    this split changed."""
+    base_pax = context["base_pax"]
+    predicted_share = context["predicted_share"]
+    seats_per_departure = context["seats_per_departure"]
+    mean_fare = context["mean_fare"]
+    distance_miles = context["distance_miles"]
+    casm_cents = context["casm_cents"]
+
+    sized_pax = base_pax * (1 + uplift)
+    mean_daily_pax = sized_pax * predicted_share / DAYS_PER_YEAR
+    boardings = _expected_boardings(mean_daily_pax, seats_per_departure, DEFAULT_FREQ_DAILY, recapture)
+
+    capacity_seats_annual = seats_per_departure * DEFAULT_FREQ_DAILY * DAYS_PER_YEAR
+    asms = capacity_seats_annual * distance_miles
+    full_capacity_revenue = capacity_seats_annual * mean_fare
+    cost = asms * (casm_cents / 100.0)
+    breakeven_lf = cost / full_capacity_revenue if full_capacity_revenue > 0 else float("inf")
+
+    expected_annual_boarded = boardings["expected_boarded"] * DAYS_PER_YEAR
+    revenue = expected_annual_boarded * mean_fare
+    contribution = revenue - cost
+    verdict1_result = _verdict_from_contribution(contribution)
+
     local_contribution = contribution
+    feed_revenue_mileage_annual = context["feed_revenue_mileage_annual"]
+    feed_revenue_shapley_annual = context["feed_revenue_shapley_annual"]
+    feed_pax_annual = context["feed_pax_annual"]
+
     total_contribution_mileage = local_contribution + feed_revenue_mileage_annual
     total_contribution_shapley = local_contribution + feed_revenue_shapley_annual
     verdict_mileage = _verdict_from_contribution(total_contribution_mileage)
@@ -405,11 +498,9 @@ def run_dester_engine(origin, dest, carrier=None, uplift=0.15, recapture=0.15, a
     )
     verdict_flipped = verdict_mileage != verdict_shapley
 
-    market_label = _market_pair(origin, dest)
-
     return {
-        "market": market_label,
-        "carrier": carrier,
+        "market": context["market"],
+        "carrier": context["carrier"],
         "verdict": verdict1_result,
         "robust": None,
         "expected_load_factor": boardings["expected_load_factor"],
@@ -418,8 +509,8 @@ def run_dester_engine(origin, dest, carrier=None, uplift=0.15, recapture=0.15, a
         "cost_annual_usd": cost,
         "contribution_annual_usd": contribution,
         "delta_e175_casm_cents": casm_cents,
-        "aircraft_type": aircraft_type,
-        "aircraft_fallback_used": aircraft_fallback_used,
+        "aircraft_type": context["aircraft_type"],
+        "aircraft_fallback_used": context["aircraft_fallback_used"],
         "sizing": {"base_pax": base_pax, "uplift": uplift, "sized_pax": sized_pax},
         "predicted_delta_share": predicted_share,
         "sensitivities": [],
@@ -448,8 +539,27 @@ def run_dester_engine(origin, dest, carrier=None, uplift=0.15, recapture=0.15, a
         "attribution_delta_usd": attribution_delta_usd,
         "attribution_leverage_pct": attribution_leverage_pct,
         "verdict_flipped": verdict_flipped,
-        "negative_phi_a_count": negative_phi_a_count,
-        "feed_v_b_fallback_count": fallback_v_b_count,
-        "total_feed_itineraries_sampled": total_feed_rows,
-        "is_hub_spoke_pair": hub is not None,
+        "negative_phi_a_count": context["negative_phi_a_count"],
+        "feed_v_b_fallback_count": context["fallback_v_b_count"],
+        "total_feed_itineraries_sampled": context["total_feed_rows"],
+        "is_hub_spoke_pair": context["hub"] is not None,
     }
+
+
+def run_dester_engine(origin, dest, carrier=None, uplift=0.15, recapture=0.15, alpha=1.6, casm_markup=1.12, shrinkage_lambda=15.0):
+    origin, dest = origin.upper(), dest.upper()
+    context = _resolve_market_context(origin, dest, carrier, casm_markup)
+    if context.get("error"):
+        return context
+    return _score_grid_point(context, uplift, recapture, alpha)
+
+
+def load_catalog_summary():
+    """Reads the batch-precomputed per-market sensitivity summary (one row
+    per Catalog market: headline verdicts, robustness, attribution leverage)
+    written by preprocess/precompute_sensitivities.py. Returns None if the
+    precompute hasn't been run yet -- callers should fall back to the plain
+    screener columns in that case."""
+    if not os.path.exists(CATALOG_SUMMARY_PATH):
+        return None
+    return pd.read_parquet(CATALOG_SUMMARY_PATH)
