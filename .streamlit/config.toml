@@ -1,0 +1,12 @@
+# Pins DESTER's dashboard to a fixed light theme so Streamlit's own
+# "Use system setting" default doesn't auto-select Dark mode based on the
+# viewing browser/OS's prefers-color-scheme -- the root cause of the
+# radio-label/sidebar-header contrast bug (native widget text rendering in
+# dark-theme colors against this app's forced-light backgrounds). Values
+# match dashboard/styles.py's COLORS dict exactly.
+[theme]
+base = "light"
+primaryColor = "#0891b2"
+backgroundColor = "#f9fafb"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#374151"

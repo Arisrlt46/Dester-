@@ -153,16 +153,47 @@ section[data-testid="stSidebar"] {{
     background-color: {COLORS["surface"]};
     border-right: 1px solid {COLORS["border"]};
 }}
+/* !important added (critical fix): this app forces light backgrounds
+   unconditionally, but Streamlit defaults to "Use system setting" theme --
+   under a dark-mode browser/OS, Streamlit's own dark-theme bodyText
+   (#fafafa, meant to sit on its #0e1117 dark background) was winning this
+   cascade in some contexts and rendering as near-invisible text (~1.04:1
+   contrast) on this forced-white sidebar. !important pins it to a
+   guaranteed-readable 10.3:1. */
 section[data-testid="stSidebar"] h3 {{
     font-size: 0.78rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: {COLORS["text_secondary"]};
+    color: {COLORS["text_secondary"]} !important;
     margin-top: 1.1rem;
     margin-bottom: 0.4rem;
     border-bottom: 1px solid {COLORS["border"]};
     padding-bottom: 0.3rem;
+}}
+
+/* ---------- Native widget labels (critical fix) -------------------------
+   Same root cause as the sidebar headers above: this app pins backgrounds
+   to light (.stApp, sidebar, cards) but never pins TEXT color on
+   Streamlit's own native widget labels. Streamlit auto-selects its Dark
+   theme when the viewing browser/OS prefers dark mode (its own
+   "Use system setting" default, confirmed against the installed
+   streamlit==1.50 frontend's getSystemTheme()/matchMedia("(prefers-color-
+   scheme: dark)") check) -- Dark theme's bodyText (#fafafa) then renders on
+   top of this app's forced-light backgrounds, producing ~1:1 contrast
+   (effectively invisible): exactly the "colored dot, no visible text" bug
+   reported for the Mode/Market radios. Scoped narrowly to each widget's own
+   data-testid so nothing outside these specific controls is touched. */
+div[data-testid="stRadio"] label,
+div[data-testid="stRadio"] label p,
+div[data-testid="stCheckbox"] label,
+div[data-testid="stCheckbox"] label p,
+div[data-testid="stSelectbox"] label,
+div[data-testid="stMultiSelect"] label,
+div[data-testid="stTextInput"] label,
+[data-testid="stWidgetLabel"] p,
+[data-testid="stCaptionContainer"] {{
+    color: {COLORS["text_secondary"]} !important;
 }}
 
 /* ---------- Sliders (v2c: were rendering in Streamlit's default red) --- */
